@@ -59,6 +59,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const API_KEY = process.env.GOOGLE_AI_API_KEY;
+const RETURN_PATH_ONLY = process.env.NANOBANANA_PATH_ONLY === "true";
 
 if (!API_KEY) {
   console.error("Error: GOOGLE_AI_API_KEY environment variable is required");
@@ -717,7 +718,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
           return {
             content: [
-              { type: "image", data: apiResponse.imageData, mimeType: "image/png" },
+              ...(RETURN_PATH_ONLY ? [] : [{ type: "image", data: apiResponse.imageData, mimeType: "image/png" }]),
               { type: "text", text: successText },
             ],
           };
@@ -941,7 +942,7 @@ IMPORTANT: Create a completely new image that incorporates the requested changes
 
           return {
             content: [
-              { type: "image", data: apiResponse.imageData, mimeType: "image/png" },
+              ...(RETURN_PATH_ONLY ? [] : [{ type: "image", data: apiResponse.imageData, mimeType: "image/png" }]),
               { type: "text", text: successText },
             ],
           };
