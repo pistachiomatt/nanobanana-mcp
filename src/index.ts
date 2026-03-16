@@ -322,7 +322,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             aspect_ratio: {
               type: "string",
               enum: [...VALID_ASPECT_RATIOS],
-              description: "Aspect ratio for the generated image. Overrides session setting if provided.",
+              description: "Aspect ratio for the generated image",
             },
             output_path: {
               type: "string",
@@ -346,7 +346,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Enable Google Search for real-world reference grounding",
             },
           },
-          required: ["prompt"],
+          required: ["prompt", "aspect_ratio"],
         },
       },
       {
@@ -387,7 +387,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Enable Google Search for real-world reference grounding",
             },
           },
-          required: ["image_path", "edit_prompt"],
+          required: ["image_path", "edit_prompt", "aspect_ratio"],
         },
       },
       {
