@@ -742,7 +742,7 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
             return {
               content: [{
                 type: "text",
-                text: `Image generation failed.\nPrompt: "${prompt}"\n` +
+                text: `Image generation failed.\n` +
                       (apiResponse.textResponse ? `Model response: ${apiResponse.textResponse}` : 'No image returned from model'),
               }],
               isError: true,
@@ -782,7 +782,6 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
           });
 
           let successText = `Image generated successfully!\n` +
-                `Prompt: "${prompt}"\n` +
                 `Saved to: ${finalPath}\n` +
                 `Session: ${conversation_id} (history: ${context.imageHistory.length} images)`;
 
@@ -966,7 +965,7 @@ IMPORTANT: Create a completely new image that incorporates the requested changes
             return {
               content: [{
                 type: "text",
-                text: `Image editing failed.\nOriginal: ${image_path}\nEdit request: "${edit_prompt}"\n` +
+                text: `Image editing failed.\nOriginal: ${image_path}\n` +
                       (apiResponse.textResponse ? `Model response: ${apiResponse.textResponse}` : 'No image returned from model'),
               }],
               isError: true,
@@ -1008,7 +1007,6 @@ IMPORTANT: Create a completely new image that incorporates the requested changes
 
           let successText = `Image edited successfully!\n` +
                 `Original: ${historyImage ? `[${image_path}] ${resolvedImagePath}` : resolvedImagePath}\n` +
-                `Edit request: "${edit_prompt}"\n` +
                 `Saved to: ${finalPath}\n` +
                 `Session: ${conversation_id} (history: ${context.imageHistory.length} images)`;
 
