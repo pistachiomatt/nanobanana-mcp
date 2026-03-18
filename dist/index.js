@@ -234,6 +234,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                             type: "string",
                             description: "Optional system prompt to guide the model's behavior",
                         },
+                        output_file: {
+                            type: "string",
+                            description: "Absolute path to write the response text to a file. The response is still returned in the tool result.",
+                        },
                     },
                     required: [],
                 },
@@ -427,7 +431,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 async function executeTool(name, args) {
     switch (name) {
         case "gemini_chat": {
-            const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [] } = args;
+            const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [], output_file } = args;
             const message = await resolvePrompt(rawMessage, message_file);
             const context = getOrCreateContext(conversation_id);
             const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
@@ -507,6 +511,16 @@ async function executeTool(name, args) {
             if (failedImages.length > 0) {
                 responseText += `\n\nWarning: ${failedImages.length} image(s) could not be loaded:\n`;
                 responseText += failedImages.map(f => `  - ${f.path}: ${f.reason}`).join('\n');
+            }
+            // Write response to file if requested
+            if (output_file) {
+                let outPath = output_file;
+                if (!path.isAbsolute(outPath)) {
+                    outPath = path.join(process.cwd(), outPath);
+                }
+                await fs.mkdir(path.dirname(outPath), { recursive: true });
+                await fs.writeFile(outPath, text, "utf-8");
+                responseText += `\n\nSaved to: ${outPath}`;
             }
             return {
                 content: [{ type: "text", text: responseText }],
