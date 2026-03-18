@@ -487,15 +487,45 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           required: ["model"],
         },
       },
+      {
+        name: "batch",
+        description: "Execute multiple nanobanana tools in parallel. Returns all results at once. Use this to run several image generations, edits, or chats concurrently.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            operations: {
+              type: "array",
+              description: "Array of tool calls to execute in parallel",
+              items: {
+                type: "object",
+                properties: {
+                  tool: {
+                    type: "string",
+                    description: "Tool name (e.g., 'gemini_generate_image', 'gemini_chat')",
+                  },
+                  args: {
+                    type: "object",
+                    description: "Arguments for the tool call",
+                  },
+                },
+                required: ["tool"],
+              },
+            },
+          },
+          required: ["operations"],
+        },
+      },
     ],
   };
 });
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+type ToolResult = {
+  content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
+  isError?: boolean;
+};
 
-  try {
-    switch (name) {
+async function executeTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
+  switch (name) {
       case "gemini_chat": {
         const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [] } = args as any;
         const message = await resolvePrompt(rawMessage, message_file);
@@ -1100,6 +1130,57 @@ IMPORTANT: Create a completely new image that incorporates the requested changes
       default:
         throw new Error(`Unknown tool: ${name}`);
     }
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const { name, arguments: args } = request.params;
+
+  try {
+    if (name === "batch") {
+      const { operations } = args as any;
+      if (!Array.isArray(operations) || operations.length === 0) {
+        return {
+          content: [{ type: "text", text: "Error: operations must be a non-empty array" }],
+          isError: true,
+        };
+      }
+
+      const results = await Promise.all(
+        operations.map(async (op: { tool: string; args?: Record<string, unknown> }, index: number) => {
+          try {
+            if (op.tool === "batch") {
+              return { index, tool: op.tool, error: "Cannot nest batch calls" };
+            }
+            const result = await executeTool(op.tool, op.args ?? {});
+            const textParts = result.content
+              .filter((c: any) => c.type === "text")
+              .map((c: any) => c.text)
+              .join("\n");
+            const hasImages = result.content.some((c: any) => c.type === "image");
+            return {
+              index,
+              tool: op.tool,
+              success: !result.isError,
+              text: textParts,
+              hasImages,
+            };
+          } catch (error) {
+            return {
+              index,
+              tool: op.tool,
+              success: false,
+              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+            };
+          }
+        })
+      );
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+      };
+    }
+
+    return await executeTool(name, args as Record<string, unknown>);
   } catch (error) {
     return {
       content: [

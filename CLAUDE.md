@@ -36,6 +36,7 @@ Everything lives in `src/index.ts`. No multi-file abstractions — it's intentio
 | `set_model` | Switch flash/pro per session |
 | `get_image_history` | List generated/edited images in session |
 | `clear_conversation` | Reset session context |
+| `batch` | Execute multiple tools in parallel, return all results |
 
 ### Prompt Resolution
 

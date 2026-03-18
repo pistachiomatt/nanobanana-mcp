@@ -393,503 +393,133 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     required: ["model"],
                 },
             },
+            {
+                name: "batch",
+                description: "Execute multiple nanobanana tools in parallel. Returns all results at once. Use this to run several image generations, edits, or chats concurrently.",
+                inputSchema: {
+                    type: "object",
+                    properties: {
+                        operations: {
+                            type: "array",
+                            description: "Array of tool calls to execute in parallel",
+                            items: {
+                                type: "object",
+                                properties: {
+                                    tool: {
+                                        type: "string",
+                                        description: "Tool name (e.g., 'gemini_generate_image', 'gemini_chat')",
+                                    },
+                                    args: {
+                                        type: "object",
+                                        description: "Arguments for the tool call",
+                                    },
+                                },
+                                required: ["tool"],
+                            },
+                        },
+                    },
+                    required: ["operations"],
+                },
+            },
         ],
     };
 });
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-    const { name, arguments: args } = request.params;
-    try {
-        switch (name) {
-            case "gemini_chat": {
-                const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [] } = args;
-                const message = await resolvePrompt(rawMessage, message_file);
-                const context = getOrCreateContext(conversation_id);
-                const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
-                const model = genAI.getGenerativeModel({
-                    model: effectiveModel,
-                    systemInstruction: system_prompt,
-                });
-                // Build message parts with images (max 10)
-                const messageParts = [{ text: message }];
-                const imageRefs = images.slice(0, 10);
-                const failedImages = [];
-                for (const imgRef of imageRefs) {
-                    try {
-                        // Check for history reference
-                        const historyImage = getImageFromHistory(context, imgRef);
-                        if (historyImage) {
-                            messageParts.push({
-                                inlineData: {
-                                    mimeType: historyImage.mimeType,
-                                    data: historyImage.base64Data,
-                                },
-                            });
-                        }
-                        else {
-                            // File path
-                            let resolvedPath = imgRef;
-                            if (!path.isAbsolute(resolvedPath)) {
-                                resolvedPath = path.join(process.cwd(), resolvedPath);
-                            }
-                            // Try alternative path if not found
-                            try {
-                                await fs.access(resolvedPath);
-                            }
-                            catch {
-                                const homeDir = os.homedir();
-                                const altPath = path.join(homeDir, 'Documents', 'nanobanana_generated', path.basename(imgRef));
-                                await fs.access(altPath);
-                                resolvedPath = altPath;
-                            }
-                            const base64 = await imageToBase64(resolvedPath);
-                            messageParts.push({
-                                inlineData: {
-                                    mimeType: "image/png",
-                                    data: base64,
-                                },
-                            });
-                        }
+async function executeTool(name, args) {
+    switch (name) {
+        case "gemini_chat": {
+            const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [] } = args;
+            const message = await resolvePrompt(rawMessage, message_file);
+            const context = getOrCreateContext(conversation_id);
+            const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
+            const model = genAI.getGenerativeModel({
+                model: effectiveModel,
+                systemInstruction: system_prompt,
+            });
+            // Build message parts with images (max 10)
+            const messageParts = [{ text: message }];
+            const imageRefs = images.slice(0, 10);
+            const failedImages = [];
+            for (const imgRef of imageRefs) {
+                try {
+                    // Check for history reference
+                    const historyImage = getImageFromHistory(context, imgRef);
+                    if (historyImage) {
+                        messageParts.push({
+                            inlineData: {
+                                mimeType: historyImage.mimeType,
+                                data: historyImage.base64Data,
+                            },
+                        });
                     }
-                    catch (error) {
-                        failedImages.push({
-                            path: imgRef,
-                            reason: error instanceof Error ? error.message : String(error),
+                    else {
+                        // File path
+                        let resolvedPath = imgRef;
+                        if (!path.isAbsolute(resolvedPath)) {
+                            resolvedPath = path.join(process.cwd(), resolvedPath);
+                        }
+                        // Try alternative path if not found
+                        try {
+                            await fs.access(resolvedPath);
+                        }
+                        catch {
+                            const homeDir = os.homedir();
+                            const altPath = path.join(homeDir, 'Documents', 'nanobanana_generated', path.basename(imgRef));
+                            await fs.access(altPath);
+                            resolvedPath = altPath;
+                        }
+                        const base64 = await imageToBase64(resolvedPath);
+                        messageParts.push({
+                            inlineData: {
+                                mimeType: "image/png",
+                                data: base64,
+                            },
                         });
                     }
                 }
-                // Add user message to history
-                context.history.push({
-                    role: "user",
-                    parts: messageParts,
-                });
-                // Start chat with history
-                const chat = model.startChat({
-                    history: context.history.slice(0, -1), // All except the last message
-                });
-                const result = await chat.sendMessage(messageParts);
-                const response = result.response;
-                const text = response.text();
-                // Add model response to history
-                context.history.push({
-                    role: "model",
-                    parts: [{ text }],
-                });
-                const imageCount = messageParts.length - 1;
-                let responseText = imageCount > 0
-                    ? `[${imageCount} image(s) included]\n\n${text}`
-                    : text;
-                if (failedImages.length > 0) {
-                    responseText += `\n\nWarning: ${failedImages.length} image(s) could not be loaded:\n`;
-                    responseText += failedImages.map(f => `  - ${f.path}: ${f.reason}`).join('\n');
-                }
-                return {
-                    content: [{ type: "text", text: responseText }],
-                };
-            }
-            case "gemini_generate_image": {
-                const { prompt: rawPrompt, prompt_file, aspect_ratio, output_path, conversation_id = "default", use_image_history = false, reference_images = [], } = args;
-                const prompt = await resolvePrompt(rawPrompt, prompt_file);
-                try {
-                    // 대화 컨텍스트 가져오기/생성
-                    const context = getOrCreateContext(conversation_id);
-                    // Validate directly passed aspect_ratio
-                    if (aspect_ratio && !VALID_ASPECT_RATIOS.includes(aspect_ratio)) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Invalid aspect ratio: ${aspect_ratio}. Valid: ${VALID_ASPECT_RATIOS.join(", ")}`,
-                                }],
-                            isError: true,
-                        };
-                    }
-                    // Priority: direct param > session setting
-                    const effectiveAspectRatio = aspect_ratio ?? context.aspectRatio;
-                    // aspectRatio 필수 체크 (둘 다 없으면 에러)
-                    if (effectiveAspectRatio === null) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Error: Aspect ratio not specified. Either pass aspect_ratio parameter or call set_aspect_ratio first.\nValid ratios: ${VALID_ASPECT_RATIOS.join(", ")}`,
-                                }],
-                            isError: true,
-                        };
-                    }
-                    // contents 구성: 참조 이미지 + 히스토리 이미지 + 프롬프트
-                    const parts = [];
-                    const failedReferenceImages = [];
-                    // 1. 수동 지정 참조 이미지 추가
-                    if (reference_images && reference_images.length > 0) {
-                        for (const imgPath of reference_images) {
-                            try {
-                                let resolvedPath = imgPath;
-                                if (!path.isAbsolute(resolvedPath)) {
-                                    resolvedPath = path.join(process.cwd(), resolvedPath);
-                                }
-                                const base64 = await imageToBase64(resolvedPath);
-                                parts.push({
-                                    inlineData: {
-                                        mimeType: "image/png",
-                                        data: base64,
-                                    },
-                                });
-                            }
-                            catch (error) {
-                                failedReferenceImages.push({
-                                    path: imgPath,
-                                    reason: error instanceof Error ? error.message : String(error),
-                                });
-                            }
-                        }
-                    }
-                    // 2. 히스토리 이미지 추가 (일관성 유지용)
-                    if (use_image_history && context.imageHistory.length > 0) {
-                        const recentImages = context.imageHistory.slice(-MAX_REFERENCE_IMAGES);
-                        for (const img of recentImages) {
-                            parts.push({
-                                inlineData: {
-                                    mimeType: img.mimeType,
-                                    data: img.base64Data,
-                                },
-                            });
-                        }
-                    }
-                    // 3. 프롬프트 추가 (히스토리 이미지가 있으면 일관성 유지 지시 추가)
-                    let finalPrompt = prompt;
-                    if (use_image_history && context.imageHistory.length > 0) {
-                        finalPrompt = `${prompt}\n\nIMPORTANT: Maintain visual consistency with the provided reference images (same style, character appearance, color palette).`;
-                    }
-                    parts.push({ text: finalPrompt });
-                    // REST API 직접 호출 (세션 모델 우선, 없으면 환경 변수 기본값)
-                    const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
-                    const apiResponse = await callGeminiImageAPI(parts, effectiveAspectRatio, effectiveModel);
-                    if (apiResponse.error) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Image generation failed: ${apiResponse.error}\n${apiResponse.textResponse}`,
-                                }],
-                            isError: true,
-                        };
-                    }
-                    if (!apiResponse.imageData) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Image generation failed.\nPrompt: "${prompt}"\n` +
-                                        (apiResponse.textResponse ? `Model response: ${apiResponse.textResponse}` : 'No image returned from model'),
-                                }],
-                            isError: true,
-                        };
-                    }
-                    // Determine output path - always ensure PNG extension
-                    let finalPath = output_path;
-                    if (!finalPath) {
-                        const homeDir = os.homedir();
-                        const tempDir = path.join(homeDir, 'Documents', 'nanobanana_generated');
-                        await fs.mkdir(tempDir, { recursive: true });
-                        const filename = `generated_${Date.now()}.png`;
-                        finalPath = path.join(tempDir, filename);
-                    }
-                    else {
-                        if (!path.isAbsolute(finalPath)) {
-                            finalPath = path.join(process.cwd(), finalPath);
-                        }
-                        if (!finalPath.toLowerCase().endsWith('.png')) {
-                            finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
-                        }
-                    }
-                    // Save image
-                    const buffer = Buffer.from(apiResponse.imageData, 'base64');
-                    await saveImageFromBuffer(buffer, finalPath);
-                    // 생성된 이미지를 히스토리에 저장
-                    addImageToHistory(context, {
-                        id: generateImageId(),
-                        filePath: finalPath,
-                        base64Data: apiResponse.imageData,
-                        mimeType: "image/png",
-                        prompt: prompt,
-                        timestamp: Date.now(),
-                        type: "generated",
-                    });
-                    let successText = `Image generated successfully!\n` +
-                        `Prompt: "${prompt}"\n` +
-                        `Saved to: ${finalPath}\n` +
-                        `Session: ${conversation_id} (history: ${context.imageHistory.length} images)`;
-                    if (failedReferenceImages.length > 0) {
-                        successText += `\n\nWarning: ${failedReferenceImages.length} reference image(s) could not be loaded:\n`;
-                        successText += failedReferenceImages.map(f => `  - ${f.path}: ${f.reason}`).join('\n');
-                    }
-                    if (apiResponse.textResponse) {
-                        successText += `\n\nModel response: ${apiResponse.textResponse}`;
-                    }
-                    return {
-                        content: [
-                            ...(RETURN_PATH_ONLY ? [] : [{ type: "image", data: apiResponse.imageData, mimeType: "image/png" }]),
-                            { type: "text", text: successText },
-                        ],
-                    };
-                }
                 catch (error) {
-                    return {
-                        content: [{
-                                type: "text",
-                                text: `Error generating image: ${error instanceof Error ? error.message : String(error)}`,
-                            }],
-                    };
-                }
-            }
-            case "gemini_edit_image": {
-                const { image_path, edit_prompt: rawEditPrompt, edit_prompt_file, aspect_ratio, output_path, conversation_id = "default", reference_images = [], } = args;
-                const edit_prompt = await resolvePrompt(rawEditPrompt, edit_prompt_file);
-                try {
-                    // 대화 컨텍스트 가져오기/생성
-                    const context = getOrCreateContext(conversation_id);
-                    // Validate directly passed aspect_ratio
-                    if (aspect_ratio && !VALID_ASPECT_RATIOS.includes(aspect_ratio)) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Invalid aspect ratio: ${aspect_ratio}. Valid: ${VALID_ASPECT_RATIOS.join(", ")}`,
-                                }],
-                            isError: true,
-                        };
-                    }
-                    // Priority: direct param > session setting
-                    const effectiveAspectRatio = aspect_ratio ?? context.aspectRatio;
-                    // aspectRatio 필수 체크 (둘 다 없으면 에러)
-                    if (effectiveAspectRatio === null) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Error: Aspect ratio not specified. Either pass aspect_ratio parameter or call set_aspect_ratio first.\nValid ratios: ${VALID_ASPECT_RATIOS.join(", ")}`,
-                                }],
-                            isError: true,
-                        };
-                    }
-                    // 히스토리 참조 확인 ("last", "history:N")
-                    let resolvedImagePath = image_path;
-                    let imageBase64;
-                    const historyImage = getImageFromHistory(context, image_path);
-                    if (historyImage) {
-                        // 히스토리에서 이미지 가져오기
-                        resolvedImagePath = historyImage.filePath;
-                        imageBase64 = historyImage.base64Data;
-                    }
-                    else {
-                        // 파일 경로로 처리
-                        if (!path.isAbsolute(resolvedImagePath)) {
-                            resolvedImagePath = path.join(process.cwd(), resolvedImagePath);
-                        }
-                        // Check if file exists
-                        try {
-                            await fs.access(resolvedImagePath);
-                        }
-                        catch {
-                            // If file doesn't exist in CWD, try in Documents/nanobanana_generated
-                            const homeDir = os.homedir();
-                            const altPath = path.join(homeDir, 'Documents', 'nanobanana_generated', path.basename(image_path));
-                            try {
-                                await fs.access(altPath);
-                                resolvedImagePath = altPath;
-                            }
-                            catch {
-                                throw new Error(`Image file not found: ${image_path}. Use 'last' or 'history:N' to reference session images.`);
-                            }
-                        }
-                        // Read the original image
-                        imageBase64 = await imageToBase64(resolvedImagePath);
-                    }
-                    // contents 구성: 참조 이미지들 + 프롬프트 + 원본 이미지
-                    const parts = [];
-                    const failedReferenceImages = [];
-                    // 1. 추가 참조 이미지 (스타일 일관성용, 최대 10개)
-                    const refImages = (reference_images || []).slice(0, 10);
-                    for (const imgRef of refImages) {
-                        try {
-                            // Check for history reference
-                            const refHistoryImage = getImageFromHistory(context, imgRef);
-                            if (refHistoryImage) {
-                                parts.push({
-                                    inlineData: {
-                                        mimeType: refHistoryImage.mimeType,
-                                        data: refHistoryImage.base64Data,
-                                    },
-                                });
-                            }
-                            else {
-                                // File path
-                                let refPath = imgRef;
-                                if (!path.isAbsolute(refPath)) {
-                                    refPath = path.join(process.cwd(), refPath);
-                                }
-                                // Try alternative path if not found
-                                try {
-                                    await fs.access(refPath);
-                                }
-                                catch {
-                                    const homeDir = os.homedir();
-                                    const altPath = path.join(homeDir, 'Documents', 'nanobanana_generated', path.basename(imgRef));
-                                    await fs.access(altPath);
-                                    refPath = altPath;
-                                }
-                                const refBase64 = await imageToBase64(refPath);
-                                parts.push({
-                                    inlineData: {
-                                        mimeType: "image/png",
-                                        data: refBase64,
-                                    },
-                                });
-                            }
-                        }
-                        catch (error) {
-                            failedReferenceImages.push({
-                                path: imgRef,
-                                reason: error instanceof Error ? error.message : String(error),
-                            });
-                        }
-                    }
-                    // 2. 편집 프롬프트
-                    const editingPrompt = `Based on this image, generate a new edited version with the following modifications: ${edit_prompt}
-
-IMPORTANT: Create a completely new image that incorporates the requested changes while maintaining the style and overall composition of the original.`;
-                    parts.push({ text: editingPrompt });
-                    // 3. 원본 이미지
-                    parts.push({
-                        inlineData: {
-                            mimeType: "image/png",
-                            data: imageBase64,
-                        },
+                    failedImages.push({
+                        path: imgRef,
+                        reason: error instanceof Error ? error.message : String(error),
                     });
-                    // REST API 직접 호출 (세션 모델 우선, 없으면 환경 변수 기본값)
-                    const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
-                    const apiResponse = await callGeminiImageAPI(parts, effectiveAspectRatio, effectiveModel);
-                    if (apiResponse.error) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Image editing failed: ${apiResponse.error}\n${apiResponse.textResponse}`,
-                                }],
-                            isError: true,
-                        };
-                    }
-                    if (!apiResponse.imageData) {
-                        return {
-                            content: [{
-                                    type: "text",
-                                    text: `Image editing failed.\nOriginal: ${image_path}\nEdit request: "${edit_prompt}"\n` +
-                                        (apiResponse.textResponse ? `Model response: ${apiResponse.textResponse}` : 'No image returned from model'),
-                                }],
-                            isError: true,
-                        };
-                    }
-                    // Determine output path - ensure PNG extension for edited images
-                    let finalPath = output_path;
-                    if (!finalPath) {
-                        const origName = historyImage ? `history_${historyImage.id}` : path.parse(image_path).name;
-                        const homeDir = os.homedir();
-                        const tempDir = path.join(homeDir, 'Documents', 'nanobanana_generated');
-                        await fs.mkdir(tempDir, { recursive: true });
-                        const filename = `${origName}_edited_${Date.now()}.png`;
-                        finalPath = path.join(tempDir, filename);
-                    }
-                    else {
-                        if (!path.isAbsolute(finalPath)) {
-                            finalPath = path.join(process.cwd(), finalPath);
-                        }
-                        if (!finalPath.toLowerCase().endsWith('.png')) {
-                            finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
-                        }
-                    }
-                    // Save image
-                    const buffer = Buffer.from(apiResponse.imageData, 'base64');
-                    await saveImageFromBuffer(buffer, finalPath);
-                    // 편집된 이미지를 히스토리에 저장
-                    addImageToHistory(context, {
-                        id: generateImageId(),
-                        filePath: finalPath,
-                        base64Data: apiResponse.imageData,
-                        mimeType: "image/png",
-                        prompt: edit_prompt,
-                        timestamp: Date.now(),
-                        type: "edited",
-                    });
-                    let successText = `Image edited successfully!\n` +
-                        `Original: ${historyImage ? `[${image_path}] ${resolvedImagePath}` : resolvedImagePath}\n` +
-                        `Edit request: "${edit_prompt}"\n` +
-                        `Saved to: ${finalPath}\n` +
-                        `Session: ${conversation_id} (history: ${context.imageHistory.length} images)`;
-                    if (failedReferenceImages.length > 0) {
-                        successText += `\n\nWarning: ${failedReferenceImages.length} reference image(s) could not be loaded:\n`;
-                        successText += failedReferenceImages.map(f => `  - ${f.path}: ${f.reason}`).join('\n');
-                    }
-                    if (apiResponse.textResponse) {
-                        successText += `\n\nModel response: ${apiResponse.textResponse}`;
-                    }
-                    return {
-                        content: [
-                            ...(RETURN_PATH_ONLY ? [] : [{ type: "image", data: apiResponse.imageData, mimeType: "image/png" }]),
-                            { type: "text", text: successText },
-                        ],
-                    };
-                }
-                catch (error) {
-                    return {
-                        content: [{
-                                type: "text",
-                                text: `Error editing image: ${error instanceof Error ? error.message : String(error)}`,
-                            }],
-                    };
                 }
             }
-            case "get_image_history": {
-                const { conversation_id } = args;
-                const context = conversations.get(conversation_id);
-                if (!context || !context.imageHistory?.length) {
-                    return {
-                        content: [
-                            {
-                                type: "text",
-                                text: `No image history found for session: ${conversation_id}`,
-                            },
-                        ],
-                    };
-                }
-                const historyInfo = context.imageHistory.map((img, index) => ({
-                    index,
-                    reference: `history:${index}`,
-                    id: img.id,
-                    filePath: img.filePath,
-                    prompt: img.prompt,
-                    type: img.type,
-                    timestamp: new Date(img.timestamp).toISOString(),
-                }));
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `Image History for session "${conversation_id}" (${context.imageHistory.length} images):\n\n` +
-                                `Use "last" to reference the most recent image, or "history:N" (e.g., "history:0") to reference by index.\n\n` +
-                                JSON.stringify(historyInfo, null, 2),
-                        },
-                    ],
-                };
+            // Add user message to history
+            context.history.push({
+                role: "user",
+                parts: messageParts,
+            });
+            // Start chat with history
+            const chat = model.startChat({
+                history: context.history.slice(0, -1), // All except the last message
+            });
+            const result = await chat.sendMessage(messageParts);
+            const response = result.response;
+            const text = response.text();
+            // Add model response to history
+            context.history.push({
+                role: "model",
+                parts: [{ text }],
+            });
+            const imageCount = messageParts.length - 1;
+            let responseText = imageCount > 0
+                ? `[${imageCount} image(s) included]\n\n${text}`
+                : text;
+            if (failedImages.length > 0) {
+                responseText += `\n\nWarning: ${failedImages.length} image(s) could not be loaded:\n`;
+                responseText += failedImages.map(f => `  - ${f.path}: ${f.reason}`).join('\n');
             }
-            case "clear_conversation": {
-                const { conversation_id } = args;
-                conversations.delete(conversation_id);
-                return {
-                    content: [
-                        {
-                            type: "text",
-                            text: `Conversation history cleared for ID: ${conversation_id}`,
-                        },
-                    ],
-                };
-            }
-            case "set_aspect_ratio": {
-                const { aspect_ratio, conversation_id = "default" } = args;
-                // Validate aspect ratio
-                if (!VALID_ASPECT_RATIOS.includes(aspect_ratio)) {
+            return {
+                content: [{ type: "text", text: responseText }],
+            };
+        }
+        case "gemini_generate_image": {
+            const { prompt: rawPrompt, prompt_file, aspect_ratio, output_path, conversation_id = "default", use_image_history = false, reference_images = [], } = args;
+            const prompt = await resolvePrompt(rawPrompt, prompt_file);
+            try {
+                // 대화 컨텍스트 가져오기/생성
+                const context = getOrCreateContext(conversation_id);
+                // Validate directly passed aspect_ratio
+                if (aspect_ratio && !VALID_ASPECT_RATIOS.includes(aspect_ratio)) {
                     return {
                         content: [{
                                 type: "text",
@@ -898,42 +528,483 @@ IMPORTANT: Create a completely new image that incorporates the requested changes
                         isError: true,
                     };
                 }
-                const context = getOrCreateContext(conversation_id);
-                context.aspectRatio = aspect_ratio;
-                return {
-                    content: [{
-                            type: "text",
-                            text: `✓ Aspect ratio set to ${aspect_ratio} for session: ${conversation_id}\nThis will apply to both image generation and editing.`,
-                        }],
-                };
-            }
-            case "set_model": {
-                const { model, conversation_id = "default" } = args;
-                const modelMap = {
-                    "flash": "gemini-3.1-flash-image-preview",
-                    "pro": "gemini-3-pro-image-preview",
-                };
-                if (!modelMap[model]) {
+                // Priority: direct param > session setting
+                const effectiveAspectRatio = aspect_ratio ?? context.aspectRatio;
+                // aspectRatio 필수 체크 (둘 다 없으면 에러)
+                if (effectiveAspectRatio === null) {
                     return {
                         content: [{
                                 type: "text",
-                                text: `Invalid model: ${model}. Use 'flash' or 'pro'.`,
+                                text: `Error: Aspect ratio not specified. Either pass aspect_ratio parameter or call set_aspect_ratio first.\nValid ratios: ${VALID_ASPECT_RATIOS.join(", ")}`,
                             }],
                         isError: true,
                     };
                 }
-                const context = getOrCreateContext(conversation_id);
-                context.selectedModel = modelMap[model];
+                // contents 구성: 참조 이미지 + 히스토리 이미지 + 프롬프트
+                const parts = [];
+                const failedReferenceImages = [];
+                // 1. 수동 지정 참조 이미지 추가
+                if (reference_images && reference_images.length > 0) {
+                    for (const imgPath of reference_images) {
+                        try {
+                            let resolvedPath = imgPath;
+                            if (!path.isAbsolute(resolvedPath)) {
+                                resolvedPath = path.join(process.cwd(), resolvedPath);
+                            }
+                            const base64 = await imageToBase64(resolvedPath);
+                            parts.push({
+                                inlineData: {
+                                    mimeType: "image/png",
+                                    data: base64,
+                                },
+                            });
+                        }
+                        catch (error) {
+                            failedReferenceImages.push({
+                                path: imgPath,
+                                reason: error instanceof Error ? error.message : String(error),
+                            });
+                        }
+                    }
+                }
+                // 2. 히스토리 이미지 추가 (일관성 유지용)
+                if (use_image_history && context.imageHistory.length > 0) {
+                    const recentImages = context.imageHistory.slice(-MAX_REFERENCE_IMAGES);
+                    for (const img of recentImages) {
+                        parts.push({
+                            inlineData: {
+                                mimeType: img.mimeType,
+                                data: img.base64Data,
+                            },
+                        });
+                    }
+                }
+                // 3. 프롬프트 추가 (히스토리 이미지가 있으면 일관성 유지 지시 추가)
+                let finalPrompt = prompt;
+                if (use_image_history && context.imageHistory.length > 0) {
+                    finalPrompt = `${prompt}\n\nIMPORTANT: Maintain visual consistency with the provided reference images (same style, character appearance, color palette).`;
+                }
+                parts.push({ text: finalPrompt });
+                // REST API 직접 호출 (세션 모델 우선, 없으면 환경 변수 기본값)
+                const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
+                const apiResponse = await callGeminiImageAPI(parts, effectiveAspectRatio, effectiveModel);
+                if (apiResponse.error) {
+                    return {
+                        content: [{
+                                type: "text",
+                                text: `Image generation failed: ${apiResponse.error}\n${apiResponse.textResponse}`,
+                            }],
+                        isError: true,
+                    };
+                }
+                if (!apiResponse.imageData) {
+                    return {
+                        content: [{
+                                type: "text",
+                                text: `Image generation failed.\nPrompt: "${prompt}"\n` +
+                                    (apiResponse.textResponse ? `Model response: ${apiResponse.textResponse}` : 'No image returned from model'),
+                            }],
+                        isError: true,
+                    };
+                }
+                // Determine output path - always ensure PNG extension
+                let finalPath = output_path;
+                if (!finalPath) {
+                    const homeDir = os.homedir();
+                    const tempDir = path.join(homeDir, 'Documents', 'nanobanana_generated');
+                    await fs.mkdir(tempDir, { recursive: true });
+                    const filename = `generated_${Date.now()}.png`;
+                    finalPath = path.join(tempDir, filename);
+                }
+                else {
+                    if (!path.isAbsolute(finalPath)) {
+                        finalPath = path.join(process.cwd(), finalPath);
+                    }
+                    if (!finalPath.toLowerCase().endsWith('.png')) {
+                        finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
+                    }
+                }
+                // Save image
+                const buffer = Buffer.from(apiResponse.imageData, 'base64');
+                await saveImageFromBuffer(buffer, finalPath);
+                // 생성된 이미지를 히스토리에 저장
+                addImageToHistory(context, {
+                    id: generateImageId(),
+                    filePath: finalPath,
+                    base64Data: apiResponse.imageData,
+                    mimeType: "image/png",
+                    prompt: prompt,
+                    timestamp: Date.now(),
+                    type: "generated",
+                });
+                let successText = `Image generated successfully!\n` +
+                    `Prompt: "${prompt}"\n` +
+                    `Saved to: ${finalPath}\n` +
+                    `Session: ${conversation_id} (history: ${context.imageHistory.length} images)`;
+                if (failedReferenceImages.length > 0) {
+                    successText += `\n\nWarning: ${failedReferenceImages.length} reference image(s) could not be loaded:\n`;
+                    successText += failedReferenceImages.map(f => `  - ${f.path}: ${f.reason}`).join('\n');
+                }
+                if (apiResponse.textResponse) {
+                    successText += `\n\nModel response: ${apiResponse.textResponse}`;
+                }
+                return {
+                    content: [
+                        ...(RETURN_PATH_ONLY ? [] : [{ type: "image", data: apiResponse.imageData, mimeType: "image/png" }]),
+                        { type: "text", text: successText },
+                    ],
+                };
+            }
+            catch (error) {
                 return {
                     content: [{
                             type: "text",
-                            text: `✓ Model set to ${model} (${modelMap[model]}) for session: ${conversation_id}`,
+                            text: `Error generating image: ${error instanceof Error ? error.message : String(error)}`,
                         }],
                 };
             }
-            default:
-                throw new Error(`Unknown tool: ${name}`);
         }
+        case "gemini_edit_image": {
+            const { image_path, edit_prompt: rawEditPrompt, edit_prompt_file, aspect_ratio, output_path, conversation_id = "default", reference_images = [], } = args;
+            const edit_prompt = await resolvePrompt(rawEditPrompt, edit_prompt_file);
+            try {
+                // 대화 컨텍스트 가져오기/생성
+                const context = getOrCreateContext(conversation_id);
+                // Validate directly passed aspect_ratio
+                if (aspect_ratio && !VALID_ASPECT_RATIOS.includes(aspect_ratio)) {
+                    return {
+                        content: [{
+                                type: "text",
+                                text: `Invalid aspect ratio: ${aspect_ratio}. Valid: ${VALID_ASPECT_RATIOS.join(", ")}`,
+                            }],
+                        isError: true,
+                    };
+                }
+                // Priority: direct param > session setting
+                const effectiveAspectRatio = aspect_ratio ?? context.aspectRatio;
+                // aspectRatio 필수 체크 (둘 다 없으면 에러)
+                if (effectiveAspectRatio === null) {
+                    return {
+                        content: [{
+                                type: "text",
+                                text: `Error: Aspect ratio not specified. Either pass aspect_ratio parameter or call set_aspect_ratio first.\nValid ratios: ${VALID_ASPECT_RATIOS.join(", ")}`,
+                            }],
+                        isError: true,
+                    };
+                }
+                // 히스토리 참조 확인 ("last", "history:N")
+                let resolvedImagePath = image_path;
+                let imageBase64;
+                const historyImage = getImageFromHistory(context, image_path);
+                if (historyImage) {
+                    // 히스토리에서 이미지 가져오기
+                    resolvedImagePath = historyImage.filePath;
+                    imageBase64 = historyImage.base64Data;
+                }
+                else {
+                    // 파일 경로로 처리
+                    if (!path.isAbsolute(resolvedImagePath)) {
+                        resolvedImagePath = path.join(process.cwd(), resolvedImagePath);
+                    }
+                    // Check if file exists
+                    try {
+                        await fs.access(resolvedImagePath);
+                    }
+                    catch {
+                        // If file doesn't exist in CWD, try in Documents/nanobanana_generated
+                        const homeDir = os.homedir();
+                        const altPath = path.join(homeDir, 'Documents', 'nanobanana_generated', path.basename(image_path));
+                        try {
+                            await fs.access(altPath);
+                            resolvedImagePath = altPath;
+                        }
+                        catch {
+                            throw new Error(`Image file not found: ${image_path}. Use 'last' or 'history:N' to reference session images.`);
+                        }
+                    }
+                    // Read the original image
+                    imageBase64 = await imageToBase64(resolvedImagePath);
+                }
+                // contents 구성: 참조 이미지들 + 프롬프트 + 원본 이미지
+                const parts = [];
+                const failedReferenceImages = [];
+                // 1. 추가 참조 이미지 (스타일 일관성용, 최대 10개)
+                const refImages = (reference_images || []).slice(0, 10);
+                for (const imgRef of refImages) {
+                    try {
+                        // Check for history reference
+                        const refHistoryImage = getImageFromHistory(context, imgRef);
+                        if (refHistoryImage) {
+                            parts.push({
+                                inlineData: {
+                                    mimeType: refHistoryImage.mimeType,
+                                    data: refHistoryImage.base64Data,
+                                },
+                            });
+                        }
+                        else {
+                            // File path
+                            let refPath = imgRef;
+                            if (!path.isAbsolute(refPath)) {
+                                refPath = path.join(process.cwd(), refPath);
+                            }
+                            // Try alternative path if not found
+                            try {
+                                await fs.access(refPath);
+                            }
+                            catch {
+                                const homeDir = os.homedir();
+                                const altPath = path.join(homeDir, 'Documents', 'nanobanana_generated', path.basename(imgRef));
+                                await fs.access(altPath);
+                                refPath = altPath;
+                            }
+                            const refBase64 = await imageToBase64(refPath);
+                            parts.push({
+                                inlineData: {
+                                    mimeType: "image/png",
+                                    data: refBase64,
+                                },
+                            });
+                        }
+                    }
+                    catch (error) {
+                        failedReferenceImages.push({
+                            path: imgRef,
+                            reason: error instanceof Error ? error.message : String(error),
+                        });
+                    }
+                }
+                // 2. 편집 프롬프트
+                const editingPrompt = `Based on this image, generate a new edited version with the following modifications: ${edit_prompt}
+
+IMPORTANT: Create a completely new image that incorporates the requested changes while maintaining the style and overall composition of the original.`;
+                parts.push({ text: editingPrompt });
+                // 3. 원본 이미지
+                parts.push({
+                    inlineData: {
+                        mimeType: "image/png",
+                        data: imageBase64,
+                    },
+                });
+                // REST API 직접 호출 (세션 모델 우선, 없으면 환경 변수 기본값)
+                const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
+                const apiResponse = await callGeminiImageAPI(parts, effectiveAspectRatio, effectiveModel);
+                if (apiResponse.error) {
+                    return {
+                        content: [{
+                                type: "text",
+                                text: `Image editing failed: ${apiResponse.error}\n${apiResponse.textResponse}`,
+                            }],
+                        isError: true,
+                    };
+                }
+                if (!apiResponse.imageData) {
+                    return {
+                        content: [{
+                                type: "text",
+                                text: `Image editing failed.\nOriginal: ${image_path}\nEdit request: "${edit_prompt}"\n` +
+                                    (apiResponse.textResponse ? `Model response: ${apiResponse.textResponse}` : 'No image returned from model'),
+                            }],
+                        isError: true,
+                    };
+                }
+                // Determine output path - ensure PNG extension for edited images
+                let finalPath = output_path;
+                if (!finalPath) {
+                    const origName = historyImage ? `history_${historyImage.id}` : path.parse(image_path).name;
+                    const homeDir = os.homedir();
+                    const tempDir = path.join(homeDir, 'Documents', 'nanobanana_generated');
+                    await fs.mkdir(tempDir, { recursive: true });
+                    const filename = `${origName}_edited_${Date.now()}.png`;
+                    finalPath = path.join(tempDir, filename);
+                }
+                else {
+                    if (!path.isAbsolute(finalPath)) {
+                        finalPath = path.join(process.cwd(), finalPath);
+                    }
+                    if (!finalPath.toLowerCase().endsWith('.png')) {
+                        finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
+                    }
+                }
+                // Save image
+                const buffer = Buffer.from(apiResponse.imageData, 'base64');
+                await saveImageFromBuffer(buffer, finalPath);
+                // 편집된 이미지를 히스토리에 저장
+                addImageToHistory(context, {
+                    id: generateImageId(),
+                    filePath: finalPath,
+                    base64Data: apiResponse.imageData,
+                    mimeType: "image/png",
+                    prompt: edit_prompt,
+                    timestamp: Date.now(),
+                    type: "edited",
+                });
+                let successText = `Image edited successfully!\n` +
+                    `Original: ${historyImage ? `[${image_path}] ${resolvedImagePath}` : resolvedImagePath}\n` +
+                    `Edit request: "${edit_prompt}"\n` +
+                    `Saved to: ${finalPath}\n` +
+                    `Session: ${conversation_id} (history: ${context.imageHistory.length} images)`;
+                if (failedReferenceImages.length > 0) {
+                    successText += `\n\nWarning: ${failedReferenceImages.length} reference image(s) could not be loaded:\n`;
+                    successText += failedReferenceImages.map(f => `  - ${f.path}: ${f.reason}`).join('\n');
+                }
+                if (apiResponse.textResponse) {
+                    successText += `\n\nModel response: ${apiResponse.textResponse}`;
+                }
+                return {
+                    content: [
+                        ...(RETURN_PATH_ONLY ? [] : [{ type: "image", data: apiResponse.imageData, mimeType: "image/png" }]),
+                        { type: "text", text: successText },
+                    ],
+                };
+            }
+            catch (error) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Error editing image: ${error instanceof Error ? error.message : String(error)}`,
+                        }],
+                };
+            }
+        }
+        case "get_image_history": {
+            const { conversation_id } = args;
+            const context = conversations.get(conversation_id);
+            if (!context || !context.imageHistory?.length) {
+                return {
+                    content: [
+                        {
+                            type: "text",
+                            text: `No image history found for session: ${conversation_id}`,
+                        },
+                    ],
+                };
+            }
+            const historyInfo = context.imageHistory.map((img, index) => ({
+                index,
+                reference: `history:${index}`,
+                id: img.id,
+                filePath: img.filePath,
+                prompt: img.prompt,
+                type: img.type,
+                timestamp: new Date(img.timestamp).toISOString(),
+            }));
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Image History for session "${conversation_id}" (${context.imageHistory.length} images):\n\n` +
+                            `Use "last" to reference the most recent image, or "history:N" (e.g., "history:0") to reference by index.\n\n` +
+                            JSON.stringify(historyInfo, null, 2),
+                    },
+                ],
+            };
+        }
+        case "clear_conversation": {
+            const { conversation_id } = args;
+            conversations.delete(conversation_id);
+            return {
+                content: [
+                    {
+                        type: "text",
+                        text: `Conversation history cleared for ID: ${conversation_id}`,
+                    },
+                ],
+            };
+        }
+        case "set_aspect_ratio": {
+            const { aspect_ratio, conversation_id = "default" } = args;
+            // Validate aspect ratio
+            if (!VALID_ASPECT_RATIOS.includes(aspect_ratio)) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Invalid aspect ratio: ${aspect_ratio}. Valid: ${VALID_ASPECT_RATIOS.join(", ")}`,
+                        }],
+                    isError: true,
+                };
+            }
+            const context = getOrCreateContext(conversation_id);
+            context.aspectRatio = aspect_ratio;
+            return {
+                content: [{
+                        type: "text",
+                        text: `✓ Aspect ratio set to ${aspect_ratio} for session: ${conversation_id}\nThis will apply to both image generation and editing.`,
+                    }],
+            };
+        }
+        case "set_model": {
+            const { model, conversation_id = "default" } = args;
+            const modelMap = {
+                "flash": "gemini-3.1-flash-image-preview",
+                "pro": "gemini-3-pro-image-preview",
+            };
+            if (!modelMap[model]) {
+                return {
+                    content: [{
+                            type: "text",
+                            text: `Invalid model: ${model}. Use 'flash' or 'pro'.`,
+                        }],
+                    isError: true,
+                };
+            }
+            const context = getOrCreateContext(conversation_id);
+            context.selectedModel = modelMap[model];
+            return {
+                content: [{
+                        type: "text",
+                        text: `✓ Model set to ${model} (${modelMap[model]}) for session: ${conversation_id}`,
+                    }],
+            };
+        }
+        default:
+            throw new Error(`Unknown tool: ${name}`);
+    }
+}
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    try {
+        if (name === "batch") {
+            const { operations } = args;
+            if (!Array.isArray(operations) || operations.length === 0) {
+                return {
+                    content: [{ type: "text", text: "Error: operations must be a non-empty array" }],
+                    isError: true,
+                };
+            }
+            const results = await Promise.all(operations.map(async (op, index) => {
+                try {
+                    if (op.tool === "batch") {
+                        return { index, tool: op.tool, error: "Cannot nest batch calls" };
+                    }
+                    const result = await executeTool(op.tool, op.args ?? {});
+                    const textParts = result.content
+                        .filter((c) => c.type === "text")
+                        .map((c) => c.text)
+                        .join("\n");
+                    const hasImages = result.content.some((c) => c.type === "image");
+                    return {
+                        index,
+                        tool: op.tool,
+                        success: !result.isError,
+                        text: textParts,
+                        hasImages,
+                    };
+                }
+                catch (error) {
+                    return {
+                        index,
+                        tool: op.tool,
+                        success: false,
+                        text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+                    };
+                }
+            }));
+            return {
+                content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+            };
+        }
+        return await executeTool(name, args);
     }
     catch (error) {
         return {
