@@ -238,6 +238,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                             type: "string",
                             description: "Absolute path to write the response text to a file. The response is still returned in the tool result.",
                         },
+                        response_format: {
+                            type: "string",
+                            enum: ["text", "json"],
+                            description: "Response format. 'json' constrains Gemini to return valid JSON (use with response_schema for structured output). Default: 'text'.",
+                        },
+                        response_schema: {
+                            type: "object",
+                            description: "JSON Schema that the response must conform to. Only used when response_format is 'json'.",
+                        },
                     },
                     required: [],
                 },
@@ -431,13 +440,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 async function executeTool(name, args) {
     switch (name) {
         case "gemini_chat": {
-            const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [], output_file } = args;
+            const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [], output_file, response_format, response_schema } = args;
             const message = await resolvePrompt(rawMessage, message_file);
             const context = getOrCreateContext(conversation_id);
             const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
+            const generationConfig = {};
+            if (response_format === "json") {
+                generationConfig.responseMimeType = "application/json";
+                if (response_schema) {
+                    generationConfig.responseSchema = response_schema;
+                }
+            }
             const model = genAI.getGenerativeModel({
                 model: effectiveModel,
                 systemInstruction: system_prompt,
+                generationConfig,
             });
             // Build message parts with images (max 10)
             const messageParts = [{ text: message }];
