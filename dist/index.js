@@ -218,7 +218,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         },
                         message_file: {
                             type: "string",
-                            description: "Path to a text file whose contents will be used as the message (alternative to message)",
+                            description: "Absolute path to a text file whose contents will be used as the message (alternative to message). Must be an absolute path.",
                         },
                         images: {
                             type: "array",
@@ -250,7 +250,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         },
                         prompt_file: {
                             type: "string",
-                            description: "Path to a text file whose contents will be used as the prompt (alternative to prompt)",
+                            description: "Absolute path to a text file whose contents will be used as the prompt (alternative to prompt). Must be an absolute path.",
                         },
                         aspect_ratio: {
                             type: "string",
@@ -298,7 +298,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         },
                         edit_prompt_file: {
                             type: "string",
-                            description: "Path to a text file whose contents will be used as edit instructions (alternative to edit_prompt)",
+                            description: "Absolute path to a text file whose contents will be used as edit instructions (alternative to edit_prompt). Must be an absolute path.",
                         },
                         aspect_ratio: {
                             type: "string",
