@@ -408,19 +408,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             {
                 name: "batch",
-                description: "Execute multiple nanobanana tools in parallel. Returns all results at once. Use this to run several image generations, edits, or chats concurrently.",
+                description: "Execute nanobanana tools in sequential steps, where each step's operations run in parallel. Use 'steps' for sequential-then-parallel (e.g., 3 set_model calls, then 3 generate_image calls). Use 'operations' for a single parallel group (backwards-compatible).",
                 inputSchema: {
                     type: "object",
                     properties: {
+                        steps: {
+                            type: "array",
+                            description: "Array of steps executed sequentially. Each step is an array of operations that run in parallel.",
+                            items: {
+                                type: "array",
+                                items: {
+                                    type: "object",
+                                    properties: {
+                                        tool: {
+                                            type: "string",
+                                            description: "Tool name (e.g., 'gemini_generate_image', 'gemini_chat')",
+                                        },
+                                        args: {
+                                            type: "object",
+                                            description: "Arguments for the tool call",
+                                        },
+                                    },
+                                    required: ["tool"],
+                                },
+                            },
+                        },
                         operations: {
                             type: "array",
-                            description: "Array of tool calls to execute in parallel",
+                            description: "Flat array of operations to run in parallel (single step). Use 'steps' instead for multi-step pipelines.",
                             items: {
                                 type: "object",
                                 properties: {
                                     tool: {
                                         type: "string",
-                                        description: "Tool name (e.g., 'gemini_generate_image', 'gemini_chat')",
+                                        description: "Tool name",
                                     },
                                     args: {
                                         type: "object",
@@ -431,7 +452,6 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                             },
                         },
                     },
-                    required: ["operations"],
                 },
             },
         ],
@@ -994,43 +1014,41 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
     try {
         if (name === "batch") {
-            const { operations } = args;
-            if (!Array.isArray(operations) || operations.length === 0) {
+            const { steps: rawSteps, operations } = args;
+            // Normalize: flat operations array → single step
+            const steps = rawSteps ?? (operations ? [operations] : []);
+            if (!Array.isArray(steps) || steps.length === 0) {
                 return {
-                    content: [{ type: "text", text: "Error: operations must be a non-empty array" }],
+                    content: [{ type: "text", text: "Error: provide 'steps' (array of arrays) or 'operations' (flat array)" }],
                     isError: true,
                 };
             }
-            const results = await Promise.all(operations.map(async (op, index) => {
-                try {
-                    if (op.tool === "batch") {
-                        return { index, tool: op.tool, error: "Cannot nest batch calls" };
+            const allResults = [];
+            for (let stepIdx = 0; stepIdx < steps.length; stepIdx++) {
+                const step = steps[stepIdx];
+                if (!Array.isArray(step) || step.length === 0)
+                    continue;
+                const stepResults = await Promise.all(step.map(async (op, opIdx) => {
+                    try {
+                        if (op.tool === "batch") {
+                            return { step: stepIdx, index: opIdx, tool: op.tool, success: false, text: "Cannot nest batch calls" };
+                        }
+                        const result = await executeTool(op.tool, op.args ?? {});
+                        const textParts = result.content
+                            .filter((c) => c.type === "text")
+                            .map((c) => c.text)
+                            .join("\n");
+                        const hasImages = result.content.some((c) => c.type === "image");
+                        return { step: stepIdx, index: opIdx, tool: op.tool, success: !result.isError, text: textParts, hasImages };
                     }
-                    const result = await executeTool(op.tool, op.args ?? {});
-                    const textParts = result.content
-                        .filter((c) => c.type === "text")
-                        .map((c) => c.text)
-                        .join("\n");
-                    const hasImages = result.content.some((c) => c.type === "image");
-                    return {
-                        index,
-                        tool: op.tool,
-                        success: !result.isError,
-                        text: textParts,
-                        hasImages,
-                    };
-                }
-                catch (error) {
-                    return {
-                        index,
-                        tool: op.tool,
-                        success: false,
-                        text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-                    };
-                }
-            }));
+                    catch (error) {
+                        return { step: stepIdx, index: opIdx, tool: op.tool, success: false, text: `Error: ${error instanceof Error ? error.message : String(error)}` };
+                    }
+                }));
+                allResults.push(...stepResults);
+            }
             return {
-                content: [{ type: "text", text: JSON.stringify(results, null, 2) }],
+                content: [{ type: "text", text: JSON.stringify(allResults, null, 2) }],
             };
         }
         return await executeTool(name, args);
