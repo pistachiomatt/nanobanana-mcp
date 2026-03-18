@@ -1,93 +1,83 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code when working in this repo.
 
-## Project Overview
+## What This Is
 
-NanoBanana MCP is a Model Context Protocol server that enables Claude Desktop/Code to use Google Gemini's multimodal capabilities for image generation, editing, and vision analysis.
+NanoBanana MCP — a Model Context Protocol server exposing Google Gemini's image generation, editing, and vision/chat capabilities over stdio. Single-file server at `src/index.ts`.
 
-## Build Commands
+## Build & Run
 
 ```bash
-npm install          # Install dependencies
-npm run build        # Compile TypeScript to dist/
-npm run dev          # Development mode with hot reload (tsx watch)
-npm run start        # Run compiled server
+npm run build        # tsc → dist/
+npm run dev          # tsx watch (hot reload)
+npm run start        # node dist/index.js
 ```
+
+**dist/ is committed.** After any change to `src/index.ts`, always `npm run build` so `dist/index.js` stays in sync. This enables direct GitHub-based `npx` usage without a build step.
 
 ## Architecture
 
-Single-file MCP server (`src/index.ts`) using stdio transport:
+Everything lives in `src/index.ts`. No multi-file abstractions — it's intentionally a single file. The structure:
 
-- **MCP SDK Integration**: Uses `@modelcontextprotocol/sdk` for server/transport
-- **Dual Gemini SDKs**:
-  - `@google/generative-ai` (`genAI`) - For chat operations
-  - `@google/genai` (`genAINew`) - For image generation/editing with streaming
+1. **CLI handler** (lines ~7–47) — `--install-commands <claude-code|cursor>` copies slash commands
+2. **Gemini API layer** — `callGeminiImageAPI()` does raw REST calls with streaming response parsing
+3. **Session management** — `conversations` Map keyed by `conversation_id`, holding chat history, image history, aspect ratio, and model selection
+4. **MCP tools** — registered via `ListToolsRequestSchema` / `CallToolRequestSchema`
 
-### Tools Exposed
+### Tools
 
-| Tool | Model | Purpose |
-|------|-------|---------|
-| `set_aspect_ratio` | N/A | **Required before image generation/editing.** Set aspect ratio for session |
-| `set_model` | N/A | Switch between flash/pro models at runtime |
-| `gemini_chat` | configurable | Multi-turn conversation with up to 10 images |
-| `gemini_generate_image` | configurable | 2K image generation with consistency support |
-| `gemini_edit_image` | configurable | Image editing via natural language |
-| `get_image_history` | N/A | View session image history |
-| `clear_conversation` | N/A | Reset conversation context |
+| Tool | Purpose |
+|------|---------|
+| `gemini_chat` | Multi-turn conversation with optional images |
+| `gemini_generate_image` | Image generation with consistency/reference support |
+| `gemini_edit_image` | Natural language image editing |
+| `set_aspect_ratio` | Set session aspect ratio (required before image gen/edit) |
+| `set_model` | Switch flash/pro per session |
+| `get_image_history` | List generated/edited images in session |
+| `clear_conversation` | Reset session context |
 
-### Aspect Ratio (Required)
+### Prompt Resolution
 
-Valid values: `1:1`, `9:16`, `16:9`, `3:4`, `4:3`, `3:2`, `2:3`, `5:4`, `4:5`, `21:9`
+All three content tools (`gemini_chat`, `gemini_generate_image`, `gemini_edit_image`) support **file-based prompts** as an alternative to inline strings:
 
-Must call `set_aspect_ratio` before `gemini_generate_image` or `gemini_edit_image`. No default value - returns error if not set.
+- `message` / `message_file`
+- `prompt` / `prompt_file`
+- `edit_prompt` / `edit_prompt_file`
 
-### Runtime Model Selection
+The `resolvePrompt()` helper reads the file and returns trimmed contents. File param takes priority if both are provided.
 
-Use `set_model` tool to switch models per-session without restarting:
-- `model="flash"` → gemini-3.1-flash-image-preview (faster, default)
-- `model="pro"` → gemini-3-pro-image-preview (higher quality)
+### Image References
 
-**Slash Commands**:
-- Claude Code: `cp commands/claude-code/*.md ~/.claude/commands/`
-- Cursor: `cp commands/cursor/*.md ~/.cursor/commands/`
-- `/nb-flash` - Switch to Flash model
-- `/nb-pro` - Switch to Pro model
+Session images can be referenced by `"last"` or `"history:N"` (e.g., `"history:0"`). This works in `image_path`, `images`, and `reference_images` params. Resolved via `getImageFromHistory()`.
 
-### Session Management
+### File Path Resolution
 
-- `conversations` Map stores per-session context (chat history + image history + aspect ratio + model)
-- Image history supports references: `"last"` or `"history:N"`
-- `MAX_IMAGE_HISTORY = 10` images per session (memory management)
-- `MAX_REFERENCE_IMAGES = 3` included in consistency prompts
-
-### Generated Files
-
-Default save location: `~/Documents/nanobanana_generated/`
-- Generated: `generated_[timestamp].png`
-- Edited: `[original]_edited_[timestamp].png`
+Image/file paths resolve in order: absolute → relative to cwd → fallback to `~/Documents/nanobanana_generated/`.
 
 ## Configuration
 
-**Required:**
-- `GOOGLE_AI_API_KEY` - Your Google AI API key
+| Env var | Required | Purpose |
+|---------|----------|---------|
+| `GOOGLE_AI_API_KEY` | Yes | Gemini API key |
+| `NANOBANANA_MODEL` | No | Default model (`gemini-3.1-flash-image-preview`) |
+| `NANOBANANA_PATH_ONLY` | No | `"true"` to skip inline base64 in responses |
 
-**Optional:**
-- `NANOBANANA_MODEL` - Model selection (default: `gemini-3.1-flash-image-preview`)
-  - `gemini-3.1-flash-image-preview` - NanoBanana (faster, default)
-  - `gemini-3-pro-image-preview` - NanoBanana Pro (higher quality)
+## Patterns to Follow
 
-Can be set via `.env` file in project root or environment variable in MCP client config.
+- **Keep it single-file.** Resist the urge to split. The whole server is ~1100 lines — that's fine.
+- **Tool params are loose.** Destructured as `args as any`. No runtime validation library. Keep it simple.
+- **Korean comments are from the original author.** Leave them; they're navigational landmarks.
+- **Session defaults.** `conversation_id` defaults to `"default"` in every tool handler. Aspect ratio has no default — must be set explicitly.
+- **Error responses** use `isError: true` in the MCP content response, not thrown exceptions (those are caught by the outer try/catch).
 
-## Installation to Claude Code
+## Slash Commands
 
-```bash
-# Default model (gemini-3.1-flash-image-preview)
-source .env && claude mcp add nanobanana-mcp "node" "dist/index.js" \
-  -e "GOOGLE_AI_API_KEY=$GOOGLE_AI_API_KEY"
+`commands/claude-code/` and `commands/cursor/` contain IDE-specific slash commands (`nb-flash.md`, `nb-pro.md`). Install with `--install-commands` CLI flag or copy manually.
 
-# Pro model (gemini-3-pro-image-preview)
-source .env && claude mcp add nanobanana-mcp "node" "dist/index.js" \
-  -e "GOOGLE_AI_API_KEY=$GOOGLE_AI_API_KEY" \
-  -e "NANOBANANA_MODEL=gemini-3-pro-image-preview"
-```
+## Adding a New Tool
+
+1. Add schema to the `tools` array in `ListToolsRequestSchema` handler
+2. Add case to the `switch` in `CallToolRequestSchema` handler
+3. If it needs text input, use `resolvePrompt()` with both inline and `_file` params
+4. Rebuild: `npm run build`

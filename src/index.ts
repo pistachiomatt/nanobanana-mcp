@@ -257,6 +257,25 @@ async function imageToBase64(imagePath: string): Promise<string> {
   return imageBuffer.toString("base64");
 }
 
+/**
+ * Resolve a text prompt: if prompt_file is provided, read it as the prompt.
+ * Returns the file contents (trimmed) if prompt_file is set, otherwise the original prompt string.
+ */
+async function resolvePrompt(prompt: string | undefined, promptFile: string | undefined): Promise<string> {
+  if (promptFile) {
+    let resolvedPath = promptFile;
+    if (!path.isAbsolute(resolvedPath)) {
+      resolvedPath = path.join(process.cwd(), resolvedPath);
+    }
+    const content = await fs.readFile(resolvedPath, "utf-8");
+    return content.trim();
+  }
+  if (!prompt) {
+    throw new Error("Either prompt or prompt_file must be provided");
+  }
+  return prompt;
+}
+
 
 async function saveImageFromBuffer(buffer: Buffer, outputPath: string): Promise<void> {
   // Ensure directory exists
@@ -291,6 +310,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               type: "string",
               description: "The message to send to Gemini",
             },
+            message_file: {
+              type: "string",
+              description: "Path to a text file whose contents will be used as the message (alternative to message)",
+            },
             images: {
               type: "array",
               items: { type: "string" },
@@ -306,7 +329,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Optional system prompt to guide the model's behavior",
             },
           },
-          required: ["message"],
+          required: [],
         },
       },
       {
@@ -318,6 +341,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             prompt: {
               type: "string",
               description: "Description of the image to generate",
+            },
+            prompt_file: {
+              type: "string",
+              description: "Path to a text file whose contents will be used as the prompt (alternative to prompt)",
             },
             aspect_ratio: {
               type: "string",
@@ -346,7 +373,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Enable Google Search for real-world reference grounding",
             },
           },
-          required: ["prompt", "aspect_ratio"],
+          required: ["aspect_ratio"],
         },
       },
       {
@@ -362,6 +389,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             edit_prompt: {
               type: "string",
               description: "Instructions for how to edit the image",
+            },
+            edit_prompt_file: {
+              type: "string",
+              description: "Path to a text file whose contents will be used as edit instructions (alternative to edit_prompt)",
             },
             aspect_ratio: {
               type: "string",
@@ -387,7 +418,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Enable Google Search for real-world reference grounding",
             },
           },
-          required: ["image_path", "edit_prompt", "aspect_ratio"],
+          required: ["image_path", "aspect_ratio"],
         },
       },
       {
@@ -466,7 +497,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "gemini_chat": {
-        const { message, conversation_id = "default", system_prompt, images = [] } = args as any;
+        const { message: rawMessage, message_file, conversation_id = "default", system_prompt, images = [] } = args as any;
+        const message = await resolvePrompt(rawMessage, message_file);
 
         const context = getOrCreateContext(conversation_id);
         const effectiveModel = context.selectedModel ?? IMAGE_MODEL;
@@ -560,13 +592,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case "gemini_generate_image": {
         const {
-          prompt,
+          prompt: rawPrompt,
+          prompt_file,
           aspect_ratio,
           output_path,
           conversation_id = "default",
           use_image_history = false,
           reference_images = [],
         } = args as any;
+        const prompt = await resolvePrompt(rawPrompt, prompt_file);
 
         try {
           // 대화 컨텍스트 가져오기/생성
@@ -735,12 +769,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case "gemini_edit_image": {
         const {
           image_path,
-          edit_prompt,
+          edit_prompt: rawEditPrompt,
+          edit_prompt_file,
           aspect_ratio,
           output_path,
           conversation_id = "default",
           reference_images = [],
         } = args as any;
+        const edit_prompt = await resolvePrompt(rawEditPrompt, edit_prompt_file);
 
         try {
           // 대화 컨텍스트 가져오기/생성
