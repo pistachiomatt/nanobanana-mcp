@@ -366,7 +366,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             output_path: {
               type: "string",
-              description: "Optional path where to save the generated image. If not provided, saves to ~/Documents/nanobanana_generated/",
+              description: "Path where to save the generated image",
             },
             conversation_id: {
               type: "string",
@@ -386,7 +386,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Enable Google Search for real-world reference grounding",
             },
           },
-          required: ["aspect_ratio"],
+          required: ["aspect_ratio", "output_path"],
         },
       },
       {
@@ -414,7 +414,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             },
             output_path: {
               type: "string",
-              description: "Optional output path. If not provided, saves to ~/Documents/nanobanana_generated/",
+              description: "Path where to save the edited image",
             },
             conversation_id: {
               type: "string",
@@ -431,7 +431,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "Enable Google Search for real-world reference grounding",
             },
           },
-          required: ["image_path", "aspect_ratio"],
+          required: ["image_path", "aspect_ratio", "output_path"],
         },
       },
       {
@@ -788,22 +788,15 @@ async function executeTool(name: string, args: Record<string, unknown>): Promise
             };
           }
 
-          // Determine output path - always ensure PNG extension
+          // Resolve output path - ensure absolute and PNG extension
           let finalPath = output_path;
-          if (!finalPath) {
-            const homeDir = os.homedir();
-            const tempDir = path.join(homeDir, 'Documents', 'nanobanana_generated');
-            await fs.mkdir(tempDir, { recursive: true });
-            const filename = `generated_${Date.now()}.png`;
-            finalPath = path.join(tempDir, filename);
-          } else {
-            if (!path.isAbsolute(finalPath)) {
-              finalPath = path.join(process.cwd(), finalPath);
-            }
-            if (!finalPath.toLowerCase().endsWith('.png')) {
-              finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
-            }
+          if (!path.isAbsolute(finalPath)) {
+            finalPath = path.join(process.cwd(), finalPath);
           }
+          if (!finalPath.toLowerCase().endsWith('.png')) {
+            finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
+          }
+          await fs.mkdir(path.dirname(finalPath), { recursive: true });
 
           // Save image
           const buffer = Buffer.from(apiResponse.imageData, 'base64');
@@ -1011,23 +1004,15 @@ IMPORTANT: Create a completely new image that incorporates the requested changes
             };
           }
 
-          // Determine output path - ensure PNG extension for edited images
+          // Resolve output path - ensure absolute and PNG extension
           let finalPath = output_path;
-          if (!finalPath) {
-            const origName = historyImage ? `history_${historyImage.id}` : path.parse(image_path).name;
-            const homeDir = os.homedir();
-            const tempDir = path.join(homeDir, 'Documents', 'nanobanana_generated');
-            await fs.mkdir(tempDir, { recursive: true });
-            const filename = `${origName}_edited_${Date.now()}.png`;
-            finalPath = path.join(tempDir, filename);
-          } else {
-            if (!path.isAbsolute(finalPath)) {
-              finalPath = path.join(process.cwd(), finalPath);
-            }
-            if (!finalPath.toLowerCase().endsWith('.png')) {
-              finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
-            }
+          if (!path.isAbsolute(finalPath)) {
+            finalPath = path.join(process.cwd(), finalPath);
           }
+          if (!finalPath.toLowerCase().endsWith('.png')) {
+            finalPath = finalPath.replace(/\.[^/.]+$/, '') + '.png';
+          }
+          await fs.mkdir(path.dirname(finalPath), { recursive: true });
 
           // Save image
           const buffer = Buffer.from(apiResponse.imageData, 'base64');
